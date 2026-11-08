@@ -6,7 +6,7 @@ Generate shareable [AWS Pricing Calculator](https://calculator.aws) URLs from ar
 
 ## How it works
 
-![Workflow: Claude writes a spec, builds and validates it against the calculator's live schemas, then saves it to a shareable calculator link](docs/workflow.png)
+![Workflow: Claude writes a spec, builds and validates it against the calculator's live schemas, then saves it to a shareable calculator link](docs/workflow-v2.png)
 
 Diagram source: [`docs/workflow.html`](docs/workflow.html).
 
