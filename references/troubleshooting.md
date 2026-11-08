@@ -71,15 +71,15 @@ format: the same components give two totals. Known case: OpenSearch gp3 storage
 under 300 GB per node (100 GB: $311.96 on the estimate page, $295.96 on the edit
 page). Shared links show the estimate-page figure; report both.
 
-## Claude in Chrome: "timed out after 45000ms"
+## The page-script call timed out
 
-`javascript_tool` stops waiting after 45 s. Start `browser_readback.js` without
+Some browser tools stop waiting for a page script after about 45 s. Start `browser_readback.js` without
 `await` and poll `window.__calcReadback` (SKILL.md Step 5). Keep each poll's wait
 around 20 s. The read-back keeps running in the page after a timeout.
 
-## Claude in Chrome: result cut off ("[TRUNCATED]")
+## The result came back cut off ("[TRUNCATED]")
 
-Single strings are cut at 1,000 characters. Fetch `window.__calcReadback.result.lines`
+Some browser tools cut long strings (one cuts at 1,000 characters). Fetch `window.__calcReadback.result.lines`
 in slices (`.slice(0, 15)`): an array of short strings comes back whole.
 
 ## The loaded estimate shows as an empty "My Estimate"

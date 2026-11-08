@@ -4,8 +4,8 @@
 //   - an estimate loaded locally with the `calc_build.py --js` loader (preferred: nothing is
 //     published), or
 //   - a saved link https://calculator.aws/#/estimate?id=<key>, opened in a new tab.
-// Evaluate this function in the page. Playwright browser_evaluate takes it as is.
-// Claude in Chrome javascript_tool stops waiting after 45 s, so start it without awaiting,
+// Evaluate this function in the page with your browser tool. Tools that stop waiting after
+// about 45 s: start it without awaiting,
 //   (<this function>)(); 'started'
 // then poll (each call under 45 s) until status is "done":
 //   await new Promise(r => setTimeout(r, 30000)); JSON.stringify(window.__calcReadback)
@@ -110,7 +110,7 @@ async ({ crossCheck = true } = {}) => {
   };
   try { walk(JSON.parse(sessionStorage.getItem('awspc-root-estimate-v1')).estimate); } catch (e) { /* no local copy */ }
 
-  // The same data as JSON lines short enough for tools that cut long strings (Claude in Chrome: 1000 chars):
+  // The same data as JSON lines short enough for tools that cut long strings (some at 1000 chars):
   // write them one per line to readback.jsonl for `calc_save.py --costs readback.jsonl`.
   const lines = [];
   for (const [id, p] of Object.entries(priced)) {
