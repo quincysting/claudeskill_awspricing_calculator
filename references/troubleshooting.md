@@ -1,85 +1,111 @@
 # Troubleshooting
 
-## $0.00 Cost Display
+Run `python scripts/calc_validate.py estimate.json` first. It catches most of
+these before saving.
 
-**Symptom:** Calculator URL opens but all services show $0.00.
+## Link total differs from the calculator after "Update estimate"
 
-**Cause:** Empty `calculationComponents` or missing `serviceCost.monthly`.
+**Cause:** the shared link displays the saved `serviceCost` values. "Update
+estimate" recomputes each service from `calculationComponents`, and services
+whose saved cost was off get a **"Cost updated"** badge.
 
-**Fix:**
-1. Ensure `calculationComponents` is fully populated (not `{}`)
-2. Ensure `serviceCost.monthly` contains the pre-calculated cost
-3. The calculator does NOT recalculate costs on load — it displays `serviceCost.monthly` as-is
+**Fix:** SKILL.md Step 5. Load the estimate in the browser before saving
+(`calc_build.py --js`), read the calculator's numbers back
+(`scripts/browser_readback.js`), copy them into `monthlyCost`, rebuild, then save.
 
-## Read-Only Warning
+## A service shows $0.00 or a cost far too low
 
-**Symptom:** Blue bar warning: "One or more services in your estimate are not
-compatible with the latest calculator release(s) and are available as read-only."
+Usually an input the calculator couldn't use:
+- **Input left out.** Optional inputs missing from `calculationComponents`
+  load as 0. A missing `storageType` gives $0 storage. `calc_build.py` lists
+  these as `not set, so the calculator uses 0`.
+- **Unit not accepted.** E.g. fileSize `"unit": "gb"` instead of `"gb|NA"`.
+  The value is dropped.
+- **Dropdown value not an option id.** It falls back to the default option, which
+  may be priced at 0 or differently.
+- **Field from another template.** E.g. MSK Serverless fields inside an MSK
+  Provisioned entry. They are ignored. The validator names the right template.
 
-**Causes:**
-1. **Version mismatch:** `version` field doesn't match the current service definition version
-2. **`columnFormIPM` format mismatch:** The column form structure doesn't match what the calculator expects
-3. **Deprecated service fields:** Using old field names or removed options
+## A service costs far too much
 
-**Fix:**
-1. Always fetch the current version via `calc_discover.py` before building
-2. For `columnFormIPM` services (AppStream, RDS, MSK, OpenSearch), use the exact
-   format from `service_formats.md` — these are the most sensitive to format changes
-3. Tier 2 services (AppStream, RDS Oracle, MSK, OpenSearch) are more likely to
-   show read-only due to `columnFormIPM` complexity
+Check units and multipliers. Secrets Manager `secretDuration` "730" without
+`"unit": "hr"` was read as 730 days: $19.52 instead of $0.86. Dropdowns like
+"requests units: millions" multiply the number next to them.
 
-**Note:** Read-only services still display correct costs, they just can't be
-edited in the calculator UI. This is acceptable for cost presentation purposes.
+## Read-only warning
 
-## Python SSL Errors
+**Symptom:** blue banner "One or more services in your estimate are not
+compatible with the latest calculator release(s) and are available as
+read-only", and the service status says Read-only.
 
-**Symptom:** `ssl.SSLCertVerificationError` or `urllib.error.URLError` when
-fetching CloudFront URLs with Python `requests` or `urllib`.
+**Cause:** the calculator threw while loading that service's components. One
+example is EC2 `pricingStrategy.selectedOption: "onDemand"`, which must be
+`"on-demand"`. Read-only services keep their saved cost and can't be edited.
+`version` mismatches do **not** cause this: the loader doesn't compare versions.
 
-**Cause:** Python 3.14 changed SSL certificate handling, breaking connections
-to some CloudFront distributions.
+**Fix:** run the validator. If it passes and the service is still read-only,
+configure that service once in the calculator UI, share it, and copy the
+components with `calc_fetch.py`.
 
-**Fix:** Always use `curl` subprocess via `calc_utils.curl_get()` and
-`calc_utils.curl_post()`. These bypass Python's SSL stack entirely.
+## "Required input" status
 
-## Version Mismatch
+A required input is missing, or a table row (`columnFormIPM`) was rejected.
+The validator reports both. A rejected row means a cell value isn't in the
+calculator's pricing data: MSK `"Compute Family": "kafka.m5.large"` (must be
+`"m5.large"`), OpenSearch `"Instance Family": "Standard Instances - Current
+Generation"` (must be `"Memory optimized"`). The service's edit page shows
+"Invalid Selection. '<value>' is not supported with the other selected inputs."
+For conditional inputs, look at the `visible if:` lines from `calc_discover.py`.
 
-**Symptom:** Services appear but show unexpected behavior or read-only warning.
+## A table service costs more than expected
 
-**Cause:** Hardcoded version numbers that have since been updated.
+A table input left out isn't 0: the calculator prices its default row.
+OpenSearch without `columnFormIPM_2` / `columnFormIPM` gets 3 r5.2xlarge
+masters and 2 UltraWarm nodes (~$3,900/mo extra). Keep those tables with
+`"Number of ..."` set to `"0"`. The validator warns about missing tables.
 
-**Fix:** Always fetch the current version from the service definition:
-```python
-from calc_discover import discover_service
-schema = discover_service("ec2Enhancement")
-current_version = schema["version"]  # e.g., "0.0.68"
-```
+## A service's edit page and the estimate page disagree
 
-## Save API Errors
+`browser_readback.js` lists these under `mismatches`. It is the calculator, not the
+format: the same components give two totals. Known case: OpenSearch gp3 storage
+under 300 GB per node (100 GB: $311.96 on the estimate page, $295.96 on the edit
+page). Shared links show the estimate-page figure; report both.
 
-**Symptom:** `curl_post` raises an error or returns unexpected response.
+## Claude in Chrome: "timed out after 45000ms"
 
-**Common causes:**
-1. Missing Origin/Referer headers (CORS error)
-2. Malformed JSON in the estimate
-3. Estimate too large (unlikely but possible)
+`javascript_tool` stops waiting after 45 s. Start `browser_readback.js` without
+`await` and poll `window.__calcReadback` (SKILL.md Step 5). Keep each poll's wait
+around 20 s. The read-back keeps running in the page after a timeout.
 
-**Fix:**
-1. Ensure using `calc_utils.curl_post()` which includes required headers
-2. Validate JSON with `json.loads(json.dumps(estimate))` before sending
-3. Check that all UUID fields are valid strings
+## Claude in Chrome: result cut off ("[TRUNCATED]")
 
-## Service Code Not Found
+Single strings are cut at 1,000 characters. Fetch `window.__calcReadback.result.lines`
+in slices (`.slice(0, 15)`): an array of short strings comes back whole.
 
-**Symptom:** `calc_discover.py` returns 404 or empty response for a service code.
+## The loaded estimate shows as an empty "My Estimate"
 
-**Fix:**
-1. Run `calc_discover.py --list` to see all valid service codes
-2. Service codes are case-sensitive and use camelCase (e.g., `ec2Enhancement`, not `EC2` or `ec2`)
-3. Common non-obvious service codes:
-   - EC2 -> `ec2Enhancement`
-   - AppStream -> `amazonAppStream`
-   - EBS -> `amazonElasticBlockStore`
-   - Flink -> `amazonKinesisDataAnalytics`
-   - OpenSearch -> `amazonElasticsearchService`
-   - Secrets Manager -> `awsSecretsManager`
+Switching to `#/estimate` makes the calculator store a fresh estimate. The `load.js`
+from `calc_build.py --js` writes the estimate again after the switch; if an older
+loader was used, run it again from the `#/estimate` page.
+
+## Save API errors
+
+`calc_save.py` stops with the raw response if the API returns a non-200
+`statusCode`, a non-JSON body or no `savedKey`. It never prints a URL built from
+an error message. Missing
+Origin/Referer headers return a CORS error (`calc_utils.curl_post` sets them).
+
+## The calculator opens a different estimate than the link
+
+The calculator restores its last in-progress estimate from the tab's
+`sessionStorage` (`awspc-root-estimate-v1`) and drops `?id=`. Open the link in a
+new tab or private window.
+
+## Service code not found (HTTP 403)
+
+The definition CDN answers 403 for unknown codes. Find the right code with
+`calc_discover.py --list <keyword>`. Codes are case-sensitive. Non-obvious ones:
+EC2 `ec2Enhancement`, EBS `amazonElasticBlockStore`, S3
+`amazonSimpleStorageServiceGroup` (not the inactive `amazonS3`), DynamoDB
+`amazonDynamoDb`, Lambda `aWSLambda`, Flink `amazonKinesisDataAnalytics`,
+OpenSearch `amazonElasticsearchService`, AppStream `amazonAppStream`.

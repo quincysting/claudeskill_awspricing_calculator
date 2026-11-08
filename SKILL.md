@@ -1,143 +1,186 @@
 ---
 name: aws-pricing-calculator
 description: >
-  Generate shareable AWS Pricing Calculator URLs from architecture descriptions,
-  blog posts, or solution documents. Discovers service schemas, looks up real
-  pricing, builds estimate JSON, and POSTs to the Save API.
-triggers:
-  - AWS cost estimate
-  - pricing calculator
-  - calculator URL
-  - cost this architecture
-  - estimate for blog
-  - AWS pricing
-  - calculate AWS costs
+  Generate shareable AWS Pricing Calculator (calculator.aws) URLs from
+  architecture descriptions, blog posts, solution documents or sizing CSVs.
+  Use for "AWS cost estimate", "pricing calculator", "calculator URL",
+  "cost this architecture", "estimate for this blog post", "MAP estimate".
+  Discovers live service schemas, builds and validates the estimate JSON,
+  saves it, and reads back the calculator's own numbers.
 ---
 
 # AWS Pricing Calculator Skill
 
-Generate a shareable AWS Pricing Calculator URL from any architecture description.
+Scripts live in `~/.claude/skills/aws-pricing-calculator/scripts/` (below: `$S`).
+Python 3 stdlib + curl only.
 
-## Trigger Terms
+## How the calculator treats a saved estimate
 
-| Phrase | Example |
-|--------|---------|
-| AWS cost estimate | "Give me an AWS cost estimate for this architecture" |
-| pricing calculator | "Create a pricing calculator for this blog post" |
-| calculator URL | "Generate a calculator URL for these services" |
-| cost this architecture | "Cost this architecture on AWS" |
-| estimate for blog | "Create an estimate for this AWS blog post" |
+Know this before building anything. Each point was confirmed in the browser.
+
+1. **The shared link first shows the saved `serviceCost` values.** These are
+   whatever the skill wrote, right or wrong.
+2. **"Update estimate"** (needed to edit) **recomputes every service from
+   `calculationComponents`** with the calculator's own prices. A service whose
+   saved cost was off gets a **"Cost updated"** badge and the new number.
+3. If a service's components can't be loaded (bad enum value, wrong shape), it
+   becomes **Read-only** and keeps its saved cost. You'll see the blue "not
+   compatible with the latest calculator" banner.
+4. Inputs are unforgiving:
+   - A dropdown value that isn't an option id **silently falls back** to the default option.
+   - A unit that isn't a unit id **drops the value**.
+   - An optional input left out loads as **0**, not as its UI default. A missing
+     table input (`columnFormIPM`) is the exception: it gets the **default row**
+     (OpenSearch: 3 dedicated masters + 2 UltraWarm nodes).
+   - A table cell (instance type, family, edition) that isn't in the calculator's
+     pricing data is rejected ("Invalid Selection"): another value is priced, or
+     none ("Required input").
+   - Fields belonging to another template are ignored.
+5. The estimate being edited lives in the tab's `sessionStorage`
+   (`awspc-root-estimate-v1`). Writing an estimate there and reloading makes the
+   calculator price it **without saving or sharing anything**. Steps 5 and 2.3 use this.
+
+So accuracy comes from **correct `calculationComponents`** (enforced by
+`calc_validate.py`, including table rows checked against the pricing data). The
+link and the calculator agree only when `monthlyCost` holds **the calculator's
+numbers**, which is what Steps 5 and 6 do.
 
 ## Workflow
 
-Follow these 6 steps in order:
+### Step 1: Extract the architecture and write down assumptions
 
-### Step 1: Extract Services
+From the doc or description, list each service with region (default
+`us-east-1`), instance types, counts, hours/utilization, storage, requests and
+data transfer. Write these as an **assumptions table**; it goes into the final
+answer. If the source leaves a cost driver unstated (hours/day, GB/month,
+request volume), pick a stated assumption. Don't silently use a default.
 
-Read the architecture document, blog post, or user description. Identify:
-- Each AWS service used
-- Instance types, storage sizes, throughput, node counts
-- Region (default: us-east-1)
-- Grouping (environments, tiers, components)
+### Step 2: Get the exact input formats
 
-### Step 2: Discover Schemas
+1. Check `references/service_formats.md` for a ready block (9 services, all
+   browser-verified, plus EC2 Savings Plans / Reserved / Spot strategies).
+2. Otherwise:
+   ```bash
+   python $S/calc_discover.py --list <keyword>              # find service codes
+   python $S/calc_discover.py <code> [<code> ...]           # ids, option ids, unit ids, visibility
+   python $S/calc_discover.py <code> ... --skeleton spec.json   # spec with every visible input at its UI default
+   ```
+   The skeleton marks the EC2 instance type `SET-INSTANCE-TYPE`, and validation
+   fails until you replace it. Table inputs get the calculator's default row,
+   completed from the pricing data; change the counts and instance types, and set
+   unused tables (masters, UltraWarm) to 0 nodes rather than deleting them.
+   Inputs printed as "no documented format" (some uncommon subTypes) aren't in
+   the skeleton. Get those from a UI capture (3. below).
+   Group services (S3 `amazonSimpleStorageServiceGroup`, DynamoDB `amazonDynamoDb`)
+   list their sub-services. Discover those codes and put them under `subServices`.
+3. **Capture a format from the UI** when unsure: the format the UI writes is the
+   reference. With a browser tool, open calculator.aws, load any estimate that
+   contains the service (Step 5 loader) or add the service by hand, configure it
+   on its edit page, click the page's **Update** button (local only), then read
+   the components back:
+   `JSON.parse(sessionStorage.getItem('awspc-root-estimate-v1')).estimate`.
+   Without a browser tool, ask the user to configure it and share the link, then
+   `python $S/calc_fetch.py "<url>" --spec ui_spec.json`.
 
-For each service, run the discovery script to get the current schema:
+### Step 3: Fill the spec
+
+Edit `spec.json` (format in `calc_build.py` docstring). Rules:
+- Use the **ids** printed after `value ids:` / `unit ids:`, as strings, exactly.
+- Spell out every input that matters. Missing optional inputs become 0.
+- Watch multiplier dropdowns and unit fields. "5 million requests" is either
+  `{"value": "5", "unit": "millionPerMonth"}` or `5000000` with `perMonth`.
+- Review UI defaults you keep. Example: EBS `snapshotFrequency` defaults to 2x daily.
+- Don't set `version`, `estimateFor` (unless picking a non-default template) or
+  `serviceName`; the builder fills them from the live definition.
+- `monthlyCost` / `upfrontCost`: your expected cost, used until Step 6 (`--costs`) replaces it.
+  Get unit prices from the AWS Pricing MCP (`get_pricing`) when available.
+
+### Step 4: Build and validate
 
 ```bash
-python ~/.claude/skills/aws-pricing-calculator/scripts/calc_discover.py <serviceCode1> <serviceCode2> ...
+python $S/calc_build.py spec.json -o estimate.json --js load.js
 ```
+Fix every `[ERROR]` (each one names the valid ids or table values). Read the
+`[WARNING]`/`[NOTE]` lines: "uses 0" lists inputs you left out, "default row"
+lists tables the calculator will fill in. Re-run until it prints `OK`.
 
-This fetches the live service definition from CloudFront and extracts all
-configurable `calculationComponents` with their IDs, types, options, and defaults.
+### Step 5: Price it in the calculator before saving (calibrate)
 
-**Check `references/service_formats.md` first** — if the service has a proven
-format there, use it directly instead of discovering from scratch.
+Use **Claude in Chrome** (or Playwright MCP). Nothing is published in this step.
 
-### Step 3: Look Up Pricing
+1. Load the Chrome tools in one ToolSearch (`tabs_context_mcp`, `tabs_create_mcp`,
+   `navigate`, `javascript_tool`, `tabs_close_mcp`), call `tabs_context_mcp`,
+   create a **new** tab and navigate it to `https://calculator.aws/#/`. Don't
+   reuse a tab with the user's own work: the loader replaces its in-progress estimate.
+2. Run the contents of `load.js` with `javascript_tool`. It stores the estimate as
+   the tab's in-progress estimate and reloads; the calculator prices every service.
+3. Start the read-back without waiting (`javascript_tool` gives up after 45 s, and
+   the read-back opens each service's edit page, about 7 s each):
+   `(<contents of scripts/browser_readback.js>)(); 'started'`
+   Poll until `status` is `done`:
+   `await new Promise(r => setTimeout(r, 20000)); JSON.stringify({s: window.__calcReadback.status, n: window.__calcReadback.checked, e: window.__calcReadback.error})`
+   (Playwright `browser_evaluate` with the function returns the result directly.)
+   If a poll finds `window.__calcReadback` undefined, the page reloaded: start step 3 again.
+4. Check `window.__calcReadback.result`: `readOnlyBanner`, and the `Status` column in
+   `root` / `groups`:
+   - `Read-only`: format bug. Fix the component, rebuild, back to 2.
+   - `Required input`: a field is missing or a table row was rejected. Open the
+     service's edit page: it names the field ("Invalid Selection ..."). Fix, rebuild, back to 2.
+   - A service more than ~10% away from your Step 3 expectation: check units,
+     multipliers and counts before trusting either number.
+5. Copy `window.__calcReadback.result.lines` into `readback.jsonl`, one line per
+   array item, fetching `.slice(0, 15)`, `.slice(15, 30)`, ... (the tool cuts any
+   single string at 1,000 characters; each line is shorter and is valid JSON on its own).
+6. Close the tab.
 
-Use the AWS Pricing API MCP tool (`get_pricing`) to get current prices:
+`result.mismatches` lists services whose edit page shows a different total than the
+estimate page: a calculator inconsistency (OpenSearch gp3 storage under 300 GB per
+node does this). Shared links show the estimate-page figure; report both.
 
-```
-get_pricing(serviceCode, region, filters)
-```
+Without a browser tool, skip this step and tell the user the link opens with the
+skill's estimates and that "Update estimate" shows the calculator's figures.
 
-Calculate monthly costs: `unit_price * quantity * hours_per_month` (730 hrs).
-
-### Step 4: Build Estimate
-
-Create a JSON spec file defining groups and services, then build:
+### Step 6: Save
 
 ```bash
-python ~/.claude/skills/aws-pricing-calculator/scripts/calc_build.py spec.json -o estimate.json
+python $S/calc_save.py estimate.json --costs readback.jsonl   # after Step 5
+python $S/calc_save.py estimate.json                          # no browser tool
 ```
+`--costs` copies the calculator's own cost and config summary into each service (by
+service id, exactly as the calculator stores them, so the link opens with no "Cost
+updated" badges), refuses to save if the calculator couldn't price a service, and
+prints the mismatches. Then it validates, saves, prints the URL and confirms the
+stored copy matches. The URL is public to anyone who has it; say so if the content is
+sensitive. Saved estimates can't be deleted, so save once.
 
-Or use the Python API directly to build the estimate dict programmatically.
+### Step 7: Report
 
-### Step 5: Save to API
-
-Upload the estimate to get a shareable URL:
-
-```bash
-python ~/.claude/skills/aws-pricing-calculator/scripts/calc_save.py estimate.json
-```
-
-### Step 6: Return Results
-
-Provide the user with:
+Give the user:
 1. The calculator URL
-2. A cost summary table (service, monthly, annual)
-3. Total monthly and annual costs
+2. A table: service, configuration, monthly, upfront, and the source of each
+   number (calculator read-back, or skill estimate if Step 5 couldn't run)
+3. Monthly, upfront and 12-month totals
+4. The assumptions table, plus any service left unverified or read-only
 
 ## Tools
 
 | Script | Purpose |
-|--------|---------|
-| `scripts/calc_utils.py` | Shared: curl helpers, UUID, constants, region map |
-| `scripts/calc_discover.py` | Fetch service defs, extract configurable components |
-| `scripts/calc_build.py` | Build estimate JSON from a spec file |
-| `scripts/calc_save.py` | POST to Save API, return shareable URL |
+|---|---|
+| `calc_discover.py` | List services; show inputs, option/unit ids, visibility; `--skeleton` (tables included) |
+| `calc_build.py` | Spec → estimate JSON, auto-fills version/template, validates; `--js` browser loader |
+| `calc_validate.py` | Validate an estimate JSON against live definitions and table pricing data |
+| `calc_save.py` | Apply calculator costs (`--costs`), validate, save, round-trip check, print URL |
+| `calc_fetch.py` | Download a saved estimate; `--spec` turns it into an editable spec |
+| `browser_readback.js` | Page function: calculator-computed status/cost per service, edit-page cross-check, `lines` for `--costs` |
+| `calc_utils.py` | Endpoints, curl helpers, caching |
 
-## Critical Rules
-
-1. **`calculationComponents` must NOT be empty** — populate all required fields or the calculator shows $0.00
-2. **`serviceCost.monthly` must be pre-calculated** — the calculator displays this value as-is on load; it does not recalculate
-3. **`estimateFor` must match the template ID** from the service definition (e.g., `"template"` for EC2, `"appStream2"` for AppStream)
-4. **`version` must match the current service definition version** — always fetch fresh via `calc_discover.py`
-5. **Use `curl` subprocess, not Python `requests`** — Python 3.14 has SSL issues with CloudFront CDN endpoints
-6. **Use AWS Pricing API MCP** (`get_pricing`) for real price lookups — never hardcode prices
-7. **Check `references/service_formats.md`** for known working formats before building from scratch
+Editing an existing estimate: `calc_fetch.py <url> --spec spec.json`, edit,
+build, save. Saved estimates are immutable, so this produces a new URL.
 
 ## References
 
 | File | Contents |
-|------|----------|
-| `references/api_endpoints.md` | CloudFront URLs, Save API request/response format |
-| `references/service_formats.md` | Proven `calculationComponents` for 9+ services |
-| `references/troubleshooting.md` | Common issues: $0 costs, read-only warnings, SSL errors |
-
-## Quick Start Examples
-
-### From a blog post URL
-```
-User: "Create an AWS pricing calculator for this blog post: https://aws.amazon.com/blogs/big-data/..."
-```
-1. Fetch and read the blog post
-2. Extract architecture: services, instance types, storage, throughput
-3. Run through Steps 2-6
-
-### From a solution document
-```
-User: "Cost this architecture: 3 EC2 m5.xlarge Windows, 1 RDS Oracle db.m5.xlarge, EBS io1 1400GB"
-```
-1. Parse the service specs from the description
-2. Discover schemas for ec2Enhancement, amazonRdsForOracle, amazonElasticBlockStore
-3. Look up pricing, build estimate, save, return URL
-
-### From a CSV/spreadsheet
-```
-User: "Build a calculator estimate from this CSV with our environment sizing"
-```
-1. Read the CSV to extract services per environment
-2. Map to service codes and calculationComponents
-3. Build grouped estimate, save, return URL
+|---|---|
+| `references/service_formats.md` | Ready spec blocks and the format rules that break estimates |
+| `references/troubleshooting.md` | Symptom → cause → fix |
+| `references/api_endpoints.md` | Endpoints and payload shapes |
