@@ -106,20 +106,18 @@ lists tables the calculator will fill in. Re-run until it prints `OK`.
 
 ### Step 5: Price it in the calculator before saving (calibrate)
 
-Use **Claude in Chrome** (or Playwright MCP). Nothing is published in this step.
+Use the browser tool available in the session. Nothing is published in this step.
 
-1. Load the Chrome tools in one ToolSearch (`tabs_context_mcp`, `tabs_create_mcp`,
-   `navigate`, `javascript_tool`, `tabs_close_mcp`), call `tabs_context_mcp`,
-   create a **new** tab and navigate it to `https://calculator.aws/#/`. Don't
-   reuse a tab with the user's own work: the loader replaces its in-progress estimate.
-2. Run the contents of `load.js` with `javascript_tool`. It stores the estimate as
-   the tab's in-progress estimate and reloads; the calculator prices every service.
-3. Start the read-back without waiting (`javascript_tool` gives up after 45 s, and
-   the read-back opens each service's edit page, about 7 s each):
+1. Open a **new** tab at `https://calculator.aws/#/`. Don't reuse a tab with the
+   user's own work: the loader replaces its in-progress estimate.
+2. Run the contents of `load.js` in that page. It stores the estimate as the tab's
+   in-progress estimate and reloads; the calculator prices every service.
+3. Start the read-back without waiting for it (it opens each service's edit page,
+   about 7 s each, and page-script tools often stop waiting after about 45 s):
    `(<contents of scripts/browser_readback.js>)(); 'started'`
    Poll until `status` is `done`:
    `await new Promise(r => setTimeout(r, 20000)); JSON.stringify({s: window.__calcReadback.status, n: window.__calcReadback.checked, e: window.__calcReadback.error})`
-   (Playwright `browser_evaluate` with the function returns the result directly.)
+   (A tool that waits for the function's promise with no time limit gets the result directly.)
    If a poll finds `window.__calcReadback` undefined, the page reloaded: start step 3 again.
 4. Check `window.__calcReadback.result`: `readOnlyBanner`, and the `Status` column in
    `root` / `groups`:
@@ -129,8 +127,8 @@ Use **Claude in Chrome** (or Playwright MCP). Nothing is published in this step.
    - A service more than ~10% away from your Step 3 expectation: check units,
      multipliers and counts before trusting either number.
 5. Copy `window.__calcReadback.result.lines` into `readback.jsonl`, one line per
-   array item, fetching `.slice(0, 15)`, `.slice(15, 30)`, ... (the tool cuts any
-   single string at 1,000 characters; each line is shorter and is valid JSON on its own).
+   array item, fetching `.slice(0, 15)`, `.slice(15, 30)`, ... (some tools cut long
+   strings; each line is short and is valid JSON on its own).
 6. Close the tab.
 
 `result.mismatches` lists services whose edit page shows a different total than the
